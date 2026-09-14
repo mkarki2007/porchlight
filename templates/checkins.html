@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Check-ins · Porchlight{% endblock %}
+{% block content %}
+
+<div class="topbar">
+  <div>
+    <h1>Check-ins</h1>
+    <div class="sub">{{ checkins|length }} calls on record</div>
+  </div>
+</div>
+
+<div class="card" style="padding:20px 22px 4px;">
+  {% for c in checkins %}
+  <div class="log-item">
+    {% set parts = c.checkin_date.split('-') %}
+    <div class="day"><b>{{ c.time_of_day }}</b>{{ c.checkin_date }}</div>
+    <div>
+      <p>{{ c.digest }}</p>
+      {% for f in c.flags %}<span class="flag {{ 'warning' if f.severity=='warning' else '' }}">⚠ {{ f.text }}</span>{% endfor %}
+    </div>
+    <div class="side">
+      <span class="dur">{{ c.duration_min }} min</span>
+      {% if c.transcript %}<a class="tlink" href="{{ url_for('transcript', checkin_id=c.id) }}">transcript</a>{% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+{% endblock %}

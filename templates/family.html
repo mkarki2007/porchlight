@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Family circle · Porchlight{% endblock %}
+{% block content %}
+
+<div class="topbar">
+  <div>
+    <h1>Family circle</h1>
+    <div class="sub">Who hears what, and when</div>
+  </div>
+</div>
+
+<div class="fam-list">
+  <div class="fam-row">
+    <div class="avatar" style="width:34px;height:34px;font-size:13px;">S</div>
+    <div class="info"><b>Sarah Whitfield</b><span>Daughter &middot; you &middot; this device</span></div>
+    <div class="pref">All alerts + daily digest</div>
+  </div>
+  <div class="fam-row">
+    <div class="avatar" style="width:34px;height:34px;font-size:13px;">M</div>
+    <div class="info"><b>Mark Whitfield</b><span>Son &middot; Denver, CO</span></div>
+    <div class="pref">Weekly summary only</div>
+  </div>
+  <div class="fam-row">
+    <div class="avatar" style="width:34px;height:34px;font-size:13px;">R</div>
+    <div class="info"><b>Ruth Palmer</b><span>Sister &middot; no app, phone updates</span></div>
+    <div class="pref">Called by Sarah if urgent</div>
+  </div>
+</div>
+
+<h2 class="section">Call &amp; escalation settings</h2>
+<div class="card">
+  <div class="settings-row"><span class="k">Daily call window</span><span class="v">9:00&ndash;9:30 AM</span></div>
+  <div class="settings-row"><span class="k">If no answer</span><span class="v">Retry in 30 min, then text Sarah</span></div>
+  <div class="settings-row"><span class="k">Elevated-concern alerts go to</span><span class="v">Sarah (SMS + app)</span></div>
+  <div class="settings-row"><span class="k">Emergency phrase detected</span><span class="v">Call Sarah immediately, no delay</span></div>
+</div>
+
+<p style="margin-top:20px; font-size:12.5px; color:var(--ink-mute); font-family:'IBM Plex Mono',monospace;">
+  These settings are display-only in this test build &mdash; editing them will come with the real telephony integration.
+</p>
+
+{% endblock %}

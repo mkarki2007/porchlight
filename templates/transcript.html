@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Transcript &middot; {{ c.checkin_date }} &middot; Porchlight{% endblock %}
+{% block content %}
+
+<a class="back-link" href="{{ url_for('checkins_list') }}">&larr; Back to check-ins</a>
+
+<div class="topbar">
+  <div>
+    <h1>Call transcript</h1>
+    <div class="sub">{{ c.checkin_date }} &middot; {{ c.time_of_day }} &middot; {{ c.duration_min }} min</div>
+  </div>
+</div>
+
+{% if c.transcript %}
+<div class="card">
+  {% for line in c.transcript %}
+  <div class="transcript-row {{ line.speaker }}">
+    <div class="tbubble">{{ line.text }}</div>
+  </div>
+  {% endfor %}
+</div>
+{% if c.flags %}
+<h2 class="section">What this became</h2>
+{% for f in c.flags %}
+<div class="alert {{ 'warning' if f.severity=='warning' else '' }}">
+  <div class="icon">⚠️</div>
+  <div class="body"><span class="tag">Extracted from this call</span><p>{{ f.text }}</p></div>
+</div>
+{% endfor %}
+{% endif %}
+{% else %}
+<div class="card empty">
+  <p>No transcript was recorded for this call &mdash; it was entered as historical seed data before live extraction was wired in.</p>
+</div>
+{% endif %}
+
+{% endblock %}

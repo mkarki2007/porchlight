@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Porchlight{% endblock %}</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><span class="dot"></span>Porchlight</div>
+
+    <div class="parent-card">
+      <div class="avatar">EW</div>
+      <div>
+        <div class="name">Eleanor Whitfield</div>
+        <div class="meta">84 &middot; Asheville, NC</div>
+      </div>
+    </div>
+    <div class="no-app-note">No app, device, or button for Eleanor &mdash; just her phone ringing like always.</div>
+
+    <nav class="tabs">
+      <a href="{{ url_for('today') }}" class="{{ 'active' if active=='today' else '' }}">Today</a>
+      <a href="{{ url_for('checkins_list') }}" class="{{ 'active' if active=='checkins' else '' }}">Check-ins</a>
+      <a href="{{ url_for('trends') }}" class="{{ 'active' if active=='trends' else '' }}">Trends</a>
+      <a href="{{ url_for('family') }}" class="{{ 'active' if active=='family' else '' }}">Family circle</a>
+    </nav>
+
+    <div class="sidebar-foot">
+      DAILY CALL &middot; 9:00&ndash;9:30 AM<br>
+      RUNNING LOCALLY ON YOUR MACHINE
+    </div>
+  </aside>
+
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</div>
+</body>
+</html>

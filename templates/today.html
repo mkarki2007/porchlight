@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Today · Porchlight{% endblock %}
+{% block content %}
+
+<div class="topbar">
+  <div>
+    <h1>Today</h1>
+    <div class="sub">{{ today_str }}</div>
+  </div>
+  {% if todays %}
+  <div class="status-pill"><span class="led"></span>Called at <b>{{ todays.time_of_day }}</b></div>
+  {% else %}
+  <div class="status-pill"><span class="led pending"></span>Call window open &mdash; 9:00&ndash;9:30 AM</div>
+  {% endif %}
+</div>
+
+{% if not todays %}
+  <div class="card empty">
+    <p>No call has run yet today. Since real telephony isn't wired up yet, trigger today's check-in manually to see the full pipeline run &mdash; transcript in, digest and flags out, all computed live and saved to the database.</p>
+    <form method="post" action="{{ url_for('simulate') }}">
+      <button class="btn primary big" type="submit">Simulate today's check-in call</button>
+    </form>
+  </div>
+{% else %}
+
+  {% for f in todays.flags %}
+  <div class="alert {{ 'warning' if f.severity=='warning' else '' }} {{ 'reviewed' if todays.reviewed else '' }}">
+    <div class="icon">{{ '✓' if todays.reviewed else '⚠️' }}</div>
+    <div class="body">
+      <span class="tag">{{ 'Reviewed by Sarah' if todays.reviewed else 'New this week' }}</span>
+      <p>{{ f.text }}</p>
+      {% if not todays.reviewed %}
+      <div class="actions">
+        <form method="post" action="{{ url_for('review', checkin_id=todays.id) }}">
+          <button class="btn primary" type="submit">Mark reviewed</button>
+        </form>
+        <a class="btn" href="{{ url_for('checkins_list') }}">See past check-ins</a>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+
+  <div class="card">
+    <div class="card-head">
+      <h3>Today's digest</h3>
+      <time>{{ todays.duration_min }} min call &middot; <a class="tlink" href="{{ url_for('transcript', checkin_id=todays.id) }}">view transcript</a></time>
+    </div>
+    <p class="quote">{{ todays.digest }}</p>
+    <div class="facts">
+      <div class="fact"><span class="k">Mood</span><span class="v">{{ todays.mood }} / 10</span></div>
+      <div class="fact"><span class="k">Medication</span><span class="v {{ 'ok' if todays.medication=='Taken' else '' }}">{{ todays.medication }}</span></div>
+      <div class="fact"><span class="k">Sleep</span><span class="v">{{ todays.sleep }}</span></div>
+      <div class="fact"><span class="k">Duration</span><span class="v">{{ todays.duration_min }} min</span></div>
+    </div>
+  </div>
+{% endif %}
+
+{% endblock %}

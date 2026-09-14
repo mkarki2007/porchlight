@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}Trends · Porchlight{% endblock %}
+{% block content %}
+
+<div class="topbar">
+  <div>
+    <h1>Trends</h1>
+    <div class="sub">Last {{ mood_data|length }} check-ins, computed from real data</div>
+  </div>
+</div>
+
+<div class="card chart-card">
+  <div class="card-head"><h3>Mood &amp; energy</h3><time>self-reported, 0&ndash;10</time></div>
+  <div class="hint">Derived from call transcripts &middot; hover a point for that day's score</div>
+  <div class="chart-wrap">
+    <svg class="linechart" id="moodChart" viewBox="0 0 640 200" preserveAspectRatio="xMidYMid meet"></svg>
+    <div class="tooltip" id="chartTooltip"></div>
+  </div>
+</div>
+
+<h2 class="section">Flags in this window</h2>
+<div class="card bars">
+  {% if counts %}
+    {% set maxcount = counts.values()|max %}
+    {% for label, n in counts.items() %}
+    <div class="bar-row">
+      <div class="label">{{ label }}</div>
+      <div class="bar-track"><div class="bar-fill serious" style="width:{{ (n / maxcount * 100)|round(0,'floor') }}%"></div></div>
+      <div class="num">{{ n }}&times;</div>
+    </div>
+    {% endfor %}
+  {% else %}
+    <p style="color:var(--ink-soft); font-size:14px; padding:8px 0;">No flags in this window &mdash; all clear.</p>
+  {% endif %}
+</div>
+
+<script>
+  var moodData = {{ mood_data|tojson }};
+
+  function drawChart(){
+    var svg = document.getElementById('moodChart');
+    var W = 640, H = 200, padL = 26, padR = 10, padT = 12, padB = 24;
+    var plotW = W - padL - padR, plotH = H - padT - padB;
+    var n = moodData.length;
+    if(n === 0) return;
+    var yFor = function(v){ return padT + plotH * (1 - v/10); };
+    var xFor = function(i){ return n>1 ? padL + (plotW * i / (n-1)) : padL + plotW/2; };
+    var svgNS = 'http://www.w3.org/2000/svg';
+    function el(tag, attrs){ var e = document.createElementNS(svgNS, tag); for(var k in attrs){ e.setAttribute(k, attrs[k]); } return e; }
+
+    [0,5,10].forEach(function(v){
+      var y = yFor(v);
+      svg.appendChild(el('line',{class:'gridline', x1:padL, x2:W-padR, y1:y, y2:y}));
+      var t = el('text',{class:'axislabel', x:2, y:y+3}); t.textContent = v; svg.appendChild(t);
+    });
+
+    var linePts = moodData.map(function(d,i){ return xFor(i)+','+yFor(d.mood); }).join(' ');
+    var areaPts = linePts + ' ' + xFor(n-1)+','+(padT+plotH) + ' ' + xFor(0)+','+(padT+plotH);
+    svg.appendChild(el('polygon',{class:'trendarea', points:areaPts}));
+    svg.appendChild(el('polyline',{class:'trendline', points:linePts}));
+    svg.appendChild(el('line',{class:'hoverline', id:'hoverline', x1:0,x2:0,y1:padT,y2:padT+plotH}));
+
+    moodData.forEach(function(d,i){
+      var cls = 'trenddot' + (i===n-1 ? ' end' : '');
+      svg.appendChild(el('circle',{class:cls, cx:xFor(i), cy:yFor(d.mood), r:i===n-1?4.5:3}));
+    });
+    svg.appendChild(el('circle',{class:'hoverdot', id:'hoverdot', r:4.5}));
+
+    var tooltip = document.getElementById('chartTooltip');
+    moodData.forEach(function(d,i){
+      var hitW = plotW / n;
+      var hit = el('rect',{class:'hit', x:padL + i*hitW - hitW/2, y:0, width:hitW, height:H});
+      hit.addEventListener('mouseenter', function(){
+        document.getElementById('hoverline').setAttribute('x1', xFor(i));
+        document.getElementById('hoverline').setAttribute('x2', xFor(i));
+        document.getElementById('hoverline').style.opacity = 1;
+        var dot = document.getElementById('hoverdot');
+        dot.setAttribute('cx', xFor(i)); dot.setAttribute('cy', yFor(d.mood)); dot.style.opacity = 1;
+        var rect = svg.getBoundingClientRect();
+        var wrapRect = svg.parentElement.getBoundingClientRect();
+        var px = rect.left - wrapRect.left + (xFor(i)/W)*rect.width;
+        var py = rect.top - wrapRect.top + (yFor(d.mood)/H)*rect.height;
+        tooltip.style.left = px + 'px'; tooltip.style.top = py + 'px';
+        tooltip.textContent = d.date + '  ·  ' + d.mood + '/10';
+        tooltip.style.opacity = 1;
+      });
+      hit.addEventListener('mouseleave', function(){
+        document.getElementById('hoverline').style.opacity = 0;
+        document.getElementById('hoverdot').style.opacity = 0;
+        tooltip.style.opacity = 0;
+      });
+      svg.appendChild(hit);
+    });
+  }
+  drawChart();
+</script>
+
+{% endblock %}
