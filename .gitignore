@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 porchlight.db
 .DS_Store
+.env
+.tools/

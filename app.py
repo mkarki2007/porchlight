@@ -1,10 +1,15 @@
 import json
+import os
 import random
+import re
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from dotenv import load_dotenv
 from flask import Flask, g, redirect, render_template, request, url_for
+
+load_dotenv()
 
 DB_PATH = Path(__file__).parent / "porchlight.db"
 
@@ -46,7 +51,13 @@ def init_db():
             flags TEXT NOT NULL,
             transcript TEXT,
             reviewed INTEGER NOT NULL DEFAULT 0,
-            answered INTEGER NOT NULL DEFAULT 1
+            answered INTEGER NOT NULL DEFAULT 1,
+            engine TEXT NOT NULL DEFAULT 'rules'
+        );
+        CREATE TABLE IF NOT EXISTS live_calls (
+            call_sid TEXT PRIMARY KEY,
+            turns TEXT NOT NULL,
+            created_at TEXT NOT NULL
         );
         """
     )
@@ -137,8 +148,8 @@ def seed(db):
         flags = SEED_FLAGS.get(d, [])
         db.execute(
             """INSERT INTO checkins
-               (checkin_date, time_of_day, duration_min, digest, mood, medication, sleep, topics, flags, transcript, reviewed, answered)
-               VALUES (?,?,?,?,?,?,?,?,?,?,1,1)""",
+               (checkin_date, time_of_day, duration_min, digest, mood, medication, sleep, topics, flags, transcript, reviewed, answered, engine)
+               VALUES (?,?,?,?,?,?,?,?,?,?,1,1,'seed')""",
             (d, t, dur, digest, mood, med, sleep, json.dumps(topics), json.dumps(flags), None),
         )
     db.commit()
@@ -239,6 +250,204 @@ def analyze_transcript(db, checkin_date, script):
     return mood, medication, sleep, topics, flags
 
 
+def llm_analyze_transcript(db, checkin_date, script):
+    """Real Claude call: reads the transcript and returns the same shape as
+    analyze_transcript, but from actual language understanding instead of
+    keyword rules. Returns None if no API key is set or the call fails,
+    so callers can fall back to the rule-based engine."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+    try:
+        import anthropic
+    except ImportError:
+        return None
+
+    transcript_text = "\n".join(
+        f"{'Caller (AI)' if speaker == 'ai' else 'Eleanor'}: {text}" for speaker, text in script
+    )
+    prior_knee = recent_knee_mentions(db, checkin_date)
+
+    system = (
+        "You analyze a daily wellness check-in call transcript between an AI caller and Eleanor, "
+        "an 84-year-old woman living alone in Asheville, NC. Her family reads what you produce, so "
+        "write it for them, not for a clinician.\n\n"
+        "Respond with ONLY a JSON object (no prose, no markdown fences), with exactly these keys:\n"
+        '  "digest": a warm 2-3 sentence summary of the call, third person\n'
+        '  "mood": integer 1-10\n'
+        '  "medication": one of "Taken", "Missed", "Not mentioned"\n'
+        '  "sleep": one of "Good", "Fair", "Poor", "Not mentioned"\n'
+        '  "topics": array of short strings (2-4 words each)\n'
+        '  "flags": array of objects {"severity": "warning"|"serious"|"critical", "text": string} for '
+        "anything her family should actually know about — new or worsening pain, a missed routine, "
+        "signs of confusion, or anything medically concerning. Do not flag a single first-time minor "
+        "mention of something ordinary.\n\n"
+        f"Context you should use: her knee has come up in {prior_knee} separate calls in the prior "
+        "7 days (not counting today). If she mentions knee pain again today, that context should "
+        "shape whether and how strongly you flag it."
+    )
+
+    client = anthropic.Anthropic(api_key=api_key)
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=700,
+            system=system,
+            messages=[{"role": "user", "content": f"Transcript:\n\n{transcript_text}"}],
+        )
+        raw = response.content[0].text.strip()
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not match:
+            return None
+        data = json.loads(match.group(0))
+    except Exception:
+        return None
+
+    mood = max(1, min(10, int(data.get("mood", 7))))
+    medication = data.get("medication", "Not mentioned")
+    sleep = data.get("sleep", "Not mentioned")
+    topics = list(data.get("topics", []))
+    flags = [
+        {"severity": f.get("severity", "warning"), "text": f.get("text", "")}
+        for f in data.get("flags", [])
+        if f.get("text")
+    ]
+    digest = data.get("digest", "").strip()
+    return digest, mood, medication, sleep, topics, flags
+
+
+# ---------------------------------------------------------------- voice (Twilio + Claude, live calls)
+
+CALLER_SYSTEM_PROMPT = (
+    "You are the voice on a warm daily wellness check-in call to Eleanor Whitfield, an 84-year-old "
+    "woman living alone in Asheville, NC. You call her every morning around 9. Her daughter Sarah "
+    "reads a summary of this call afterward, so your job is to have a natural, caring conversation "
+    "that surfaces how she's really doing: her mood, whether she took her morning medication, how "
+    "she slept, and anything about her routine — her garden, her neighbor Diane she usually walks "
+    "with, her sister Ruth, her family.\n\n"
+    "Speak naturally, one short warm line at a time — this is a phone call, not a form. Ask one "
+    "thing at a time. After a natural amount of conversation (roughly 6-10 of your turns) once "
+    "you've covered mood, medication, and sleep, warmly say goodbye and end the call.\n\n"
+    "Respond with ONLY a JSON object, no prose, no markdown fences: "
+    '{"say": "the exact words you say next, natural spoken language", "end_call": true or false}'
+)
+
+
+def twilio_configured():
+    return all(
+        os.environ.get(k)
+        for k in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER", "TEST_PHONE_NUMBER")
+    )
+
+
+def verify_twilio_signature(req):
+    """Confirms a webhook request actually came from Twilio. Skipped (returns True)
+    when no auth token is configured yet — there's nothing to validate against until
+    Twilio is actually wired up."""
+    token = os.environ.get("TWILIO_AUTH_TOKEN")
+    if not token:
+        return True
+    try:
+        from twilio.request_validator import RequestValidator
+    except ImportError:
+        return True
+    validator = RequestValidator(token)
+    signature = req.headers.get("X-Twilio-Signature", "")
+    return validator.validate(req.url, req.form, signature)
+
+
+def get_call_turns(db, call_sid):
+    row = db.execute("SELECT turns FROM live_calls WHERE call_sid = ?", (call_sid,)).fetchone()
+    if not row:
+        return []
+    return [(t["speaker"], t["text"]) for t in json.loads(row["turns"])]
+
+
+def save_call_turns(db, call_sid, turns):
+    payload = json.dumps([{"speaker": s, "text": t} for s, t in turns])
+    db.execute(
+        """INSERT INTO live_calls (call_sid, turns, created_at) VALUES (?, ?, ?)
+           ON CONFLICT(call_sid) DO UPDATE SET turns = excluded.turns""",
+        (call_sid, payload, datetime.now().isoformat()),
+    )
+    db.commit()
+
+
+def claude_next_turn(turns):
+    """Runs the live conversation one turn forward. Returns (say_text, end_call).
+    Unlike the after-the-fact analysis, a live open-ended conversation has no
+    reasonable rule-based substitute — without a key this ends the call gracefully."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return ("I'm sorry, I'm having trouble connecting right now. I'll try again tomorrow "
+                "morning. Take care, Eleanor.", True)
+    try:
+        import anthropic
+    except ImportError:
+        return ("I'm sorry, I'm having trouble connecting right now. I'll try again tomorrow "
+                "morning. Take care, Eleanor.", True)
+
+    messages = [
+        {"role": "assistant" if s == "ai" else "user", "content": t}
+        for s, t in turns
+    ]
+    if not messages:
+        messages = [{"role": "user", "content": "(The call has just connected. Greet her and start the check-in.)"}]
+
+    client = anthropic.Anthropic(api_key=api_key)
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            system=CALLER_SYSTEM_PROMPT,
+            messages=messages,
+        )
+        raw = response.content[0].text.strip()
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not match:
+            return ("Thanks for chatting, Eleanor — talk again tomorrow. Take care!", True)
+        data = json.loads(match.group(0))
+        return data.get("say", "Take care, Eleanor."), bool(data.get("end_call", False))
+    except Exception:
+        return ("I'm sorry, I'm having a little trouble right now. I'll call again tomorrow "
+                "morning. Take care, Eleanor.", True)
+
+
+def finalize_call(db, call_sid):
+    row = db.execute("SELECT turns FROM live_calls WHERE call_sid = ?", (call_sid,)).fetchone()
+    if not row:
+        return
+    turns = [(t["speaker"], t["text"]) for t in json.loads(row["turns"])]
+    today_str = date.today().strftime("%Y-%m-%d")
+
+    llm_result = llm_analyze_transcript(db, today_str, turns) if turns else None
+    if llm_result is not None:
+        digest, mood, medication, sleep, topics, flags = llm_result
+        engine = "claude"
+    else:
+        mood, medication, sleep, topics, flags = analyze_transcript(db, today_str, turns) if turns else (7, "Not mentioned", "Not mentioned", [], [])
+        digest = "Real call completed. AI summary unavailable — set ANTHROPIC_API_KEY for a full digest."
+        engine = "rules"
+
+    time_of_day = datetime.now().strftime("%-I:%M %p")
+    duration = max(1, round(len(turns) * 0.4))
+
+    db.execute("DELETE FROM checkins WHERE checkin_date = ?", (today_str,))
+    db.execute(
+        """INSERT INTO checkins
+           (checkin_date, time_of_day, duration_min, digest, mood, medication, sleep, topics, flags, transcript, reviewed, answered, engine)
+           VALUES (?,?,?,?,?,?,?,?,?,?,0,1,?)""",
+        (
+            today_str, time_of_day, duration, digest, mood, medication, sleep,
+            json.dumps(topics), json.dumps(flags),
+            json.dumps([{"speaker": s, "text": t} for s, t in turns]),
+            engine,
+        ),
+    )
+    db.execute("DELETE FROM live_calls WHERE call_sid = ?", (call_sid,))
+    db.commit()
+
+
 # ---------------------------------------------------------------- helpers
 
 def load_checkins(db):
@@ -280,6 +489,7 @@ def today():
         today_str=today_str,
         streak=streak,
         open_alerts=open_alerts,
+        twilio_ready=twilio_configured(),
     )
 
 
@@ -289,17 +499,26 @@ def simulate():
     today_str = date.today().strftime("%Y-%m-%d")
     existing = db.execute("SELECT id FROM checkins WHERE checkin_date = ?", (today_str,)).fetchone()
     if existing is None:
-        mood, medication, sleep, topics, flags = analyze_transcript(db, today_str, TODAY_CALL_SCRIPT)
+        llm_result = llm_analyze_transcript(db, today_str, TODAY_CALL_SCRIPT)
+        if llm_result is not None:
+            digest, mood, medication, sleep, topics, flags = llm_result
+            engine = "claude"
+        else:
+            mood, medication, sleep, topics, flags = analyze_transcript(db, today_str, TODAY_CALL_SCRIPT)
+            digest = TODAY_DIGEST
+            engine = "rules"
+
         time_of_day = datetime.now().strftime("%-I:%M %p")
         duration = random.randint(4, 8)
         db.execute(
             """INSERT INTO checkins
-               (checkin_date, time_of_day, duration_min, digest, mood, medication, sleep, topics, flags, transcript, reviewed, answered)
-               VALUES (?,?,?,?,?,?,?,?,?,?,0,1)""",
+               (checkin_date, time_of_day, duration_min, digest, mood, medication, sleep, topics, flags, transcript, reviewed, answered, engine)
+               VALUES (?,?,?,?,?,?,?,?,?,?,0,1,?)""",
             (
-                today_str, time_of_day, duration, TODAY_DIGEST, mood, medication, sleep,
+                today_str, time_of_day, duration, digest, mood, medication, sleep,
                 json.dumps(topics), json.dumps(flags),
                 json.dumps([{"speaker": s, "text": t} for s, t in TODAY_CALL_SCRIPT]),
+                engine,
             ),
         )
         db.commit()
@@ -358,6 +577,105 @@ def trends():
 @app.route("/family")
 def family():
     return render_template("family.html", active="family")
+
+
+# ---------------------------------------------------------------- voice routes
+
+@app.route("/call/start", methods=["POST"])
+def call_start():
+    if not twilio_configured():
+        return "Twilio isn't configured yet — set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER and TEST_PHONE_NUMBER in .env", 400
+    from twilio.rest import Client
+
+    client = Client(os.environ["TWILIO_ACCOUNT_SID"], os.environ["TWILIO_AUTH_TOKEN"])
+    client.calls.create(
+        to=os.environ["TEST_PHONE_NUMBER"],
+        from_=os.environ["TWILIO_PHONE_NUMBER"],
+        url=url_for("voice_incoming", _external=True),
+        status_callback=url_for("voice_status", _external=True),
+        status_callback_event=["completed"],
+    )
+    return redirect(url_for("today"))
+
+
+@app.route("/voice/incoming", methods=["POST"])
+def voice_incoming():
+    from twilio.twiml.voice_response import VoiceResponse, Gather
+
+    if not verify_twilio_signature(request):
+        return ("", 403)
+
+    db = get_db()
+    call_sid = request.form.get("CallSid", "")
+    say_text, end_call = claude_next_turn([])
+    save_call_turns(db, call_sid, [("ai", say_text)])
+
+    vr = VoiceResponse()
+    if end_call:
+        vr.say(say_text)
+        vr.hangup()
+        finalize_call(db, call_sid)
+    else:
+        gather = Gather(input="speech", action=url_for("voice_respond", _external=True), method="POST", speech_timeout="auto")
+        gather.say(say_text)
+        vr.append(gather)
+        vr.say("Sorry, I didn't catch that. I'll try again tomorrow morning. Take care!")
+        vr.hangup()
+        finalize_call(db, call_sid)
+    return str(vr), 200, {"Content-Type": "text/xml"}
+
+
+@app.route("/voice/respond", methods=["POST"])
+def voice_respond():
+    from twilio.twiml.voice_response import VoiceResponse, Gather
+
+    if not verify_twilio_signature(request):
+        return ("", 403)
+
+    db = get_db()
+    call_sid = request.form.get("CallSid", "")
+    speech = request.form.get("SpeechResult", "").strip()
+    turns = get_call_turns(db, call_sid)
+
+    if not speech:
+        vr = VoiceResponse()
+        gather = Gather(input="speech", action=url_for("voice_respond", _external=True), method="POST", speech_timeout="auto")
+        gather.say("Sorry, could you say that again?")
+        vr.append(gather)
+        vr.say("I'll try again tomorrow morning. Take care, Eleanor!")
+        vr.hangup()
+        finalize_call(db, call_sid)
+        return str(vr), 200, {"Content-Type": "text/xml"}
+
+    turns.append(("el", speech))
+    say_text, end_call = claude_next_turn(turns)
+    turns.append(("ai", say_text))
+    save_call_turns(db, call_sid, turns)
+
+    vr = VoiceResponse()
+    if end_call:
+        vr.say(say_text)
+        vr.hangup()
+        finalize_call(db, call_sid)
+    else:
+        gather = Gather(input="speech", action=url_for("voice_respond", _external=True), method="POST", speech_timeout="auto")
+        gather.say(say_text)
+        vr.append(gather)
+        vr.say("I'll try again tomorrow morning. Take care, Eleanor!")
+        vr.hangup()
+        finalize_call(db, call_sid)
+    return str(vr), 200, {"Content-Type": "text/xml"}
+
+
+@app.route("/voice/status", methods=["POST"])
+def voice_status():
+    if not verify_twilio_signature(request):
+        return ("", 403)
+    db = get_db()
+    call_sid = request.form.get("CallSid", "")
+    if call_sid:
+        finalize_call(db, call_sid)
+    return ("", 204)
 
 
 if __name__ == "__main__":

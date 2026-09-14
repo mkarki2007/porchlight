@@ -17,9 +17,14 @@
 {% if not todays %}
   <div class="card empty">
     <p>No call has run yet today. Since real telephony isn't wired up yet, trigger today's check-in manually to see the full pipeline run &mdash; transcript in, digest and flags out, all computed live and saved to the database.</p>
-    <form method="post" action="{{ url_for('simulate') }}">
+    <form method="post" action="{{ url_for('simulate') }}" style="display:inline;">
       <button class="btn primary big" type="submit">Simulate today's check-in call</button>
     </form>
+    {% if twilio_ready %}
+    <form method="post" action="{{ url_for('call_start') }}" style="display:inline; margin-left:10px;">
+      <button class="btn big" type="submit">📞 Call me now (real AI call)</button>
+    </form>
+    {% endif %}
   </div>
 {% else %}
 
@@ -43,7 +48,10 @@
 
   <div class="card">
     <div class="card-head">
-      <h3>Today's digest</h3>
+      <h3>Today's digest
+        {% if todays.engine == 'claude' %}<span class="engine-badge claude">Claude</span>
+        {% elif todays.engine == 'rules' %}<span class="engine-badge rules">rule-based fallback</span>{% endif %}
+      </h3>
       <time>{{ todays.duration_min }} min call &middot; <a class="tlink" href="{{ url_for('transcript', checkin_id=todays.id) }}">view transcript</a></time>
     </div>
     <p class="quote">{{ todays.digest }}</p>
